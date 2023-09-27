@@ -8,8 +8,7 @@
 typedef struct dccthread{
     const char* name;
     ucontext_t context;
-    int expected;
-    int execution;
+    int id;
 } dccthread_t;
 
 typedef struct {
@@ -17,7 +16,7 @@ typedef struct {
     struct dlist* ready_queue;
     struct dlist* wait_queue;
     dccthread_t* current_thread;
-    int waiterSignal;
+    int globalID;
 } managerThreads;
 
 managerThreads central;
@@ -51,16 +50,14 @@ void dccthread_init(void (*func)(int),int param){
         exit(1);
     }
     main->name = "main";
-    main->execution = 0;
-    main->expected = 0;
+    main->id = 0;
     main->context.uc_link = &central.manager;
     makecontext(&(main->context),(void(*)(void))func,1,param);
 
     central.ready_queue = dlist_create();
     dlist_push_right(central.ready_queue,main);
 
-    central.waiterSignal = 0;
-
+    central.globalID = 0;
 
     setcontext(&central.manager);
 
@@ -71,6 +68,7 @@ void dccthread_init(void (*func)(int),int param){
 dccthread_t* dccthread_create(const char* name, void (*func)(int),int param){
     dccthread_t* newThread = (dccthread_t*)malloc(sizeof(dccthread_t));
     newThread->name = name;
+    newThread->id = central.globalID++;
 
     getcontext(&(newThread->context));
     newThread->context.uc_stack.ss_size = THREAD_STACK_SIZE;
@@ -79,8 +77,6 @@ dccthread_t* dccthread_create(const char* name, void (*func)(int),int param){
         perror("Failing allocationg space to new thread");
         return NULL;
     }
-    newThread->expected = 0;
-    newThread->execution = 0;
     newThread->context.uc_link = &central.manager;
     makecontext(&(newThread->context),(void(*)(void))func,1,param);
     
@@ -112,9 +108,9 @@ const char * dccthread_name(dccthread_t *tid){
 
 void dccthread_wait(dccthread_t* tid){
     
-    if(!tid->execution){
+    // printf("tid - %d x  current thread - %d x global - %d \n",tid->id,central.current_thread->id,central.globalID);
+    if(tid->id >= central.current_thread->id){
         getcontext(&central.current_thread->context);
-        tid->expected = 1;
         struct dlist* tmp = dlist_create();
         dlist_push_right(tmp,tid);
         dlist_push_right(tmp,central.current_thread);
