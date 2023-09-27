@@ -15,8 +15,9 @@ typedef struct dccthread{
 typedef struct {
     ucontext_t manager;
     struct dlist* ready_queue;
+    struct dlist* wait_queue;
     dccthread_t* current_thread;
-    dccthread_t* waiter;
+    int waiterSignal;
 } managerThreads;
 
 managerThreads central;
@@ -58,7 +59,7 @@ void dccthread_init(void (*func)(int),int param){
     central.ready_queue = dlist_create();
     dlist_push_right(central.ready_queue,main);
 
-    // central.waiterSignal = 0;
+    central.waiterSignal = 0;
 
 
     setcontext(&central.manager);
@@ -111,15 +112,22 @@ const char * dccthread_name(dccthread_t *tid){
 
 void dccthread_wait(dccthread_t* tid){
     
+    if(!tid->execution){
+        getcontext(&central.current_thread->context);
+        tid->expected = 1;
+        struct dlist* tmp = dlist_create();
+        dlist_push_right(tmp,tid);
+        dlist_push_right(tmp,central.current_thread);
+        dccthread_t* thread;
+        while(!dlist_empty(central.ready_queue)){
+            thread = dlist_pop_left(central.ready_queue);
+            dlist_push_right(tmp,thread);
+        }
+        central.ready_queue = tmp;
+        swapcontext(&central.current_thread->context,&central.manager);
+    }
 }
 
 void dccthread_exit(){
-
-    if(!central.current_thread->expected){
-        swapcontext(&central.current_thread->context,&central.manager);
-    }
-    else{
-        setcontext(&central.waiter->context);
-    }
-
+    swapcontext(&central.current_thread->context,&central.manager);
 }
