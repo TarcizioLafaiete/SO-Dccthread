@@ -3,12 +3,14 @@
 #include <stdlib.h>
 #include "dccthread.h"
 #include "dlist.h"
+#include <signal.h>
 
 
 typedef struct dccthread{
     const char* name;
     ucontext_t context;
     int id;
+    int dccyield_call;
 } dccthread_t;
 
 typedef struct {
@@ -20,6 +22,28 @@ typedef struct {
 } managerThreads;
 
 managerThreads central;
+
+void expired(union sigval timer_data){
+        dccthread_yield();
+}
+
+
+void create_timer(int ms){
+    struct sigevent event = { 0 };
+    timer_t timer_id = 0;
+    event.sigev_notify = SIGEV_THREAD;
+    event.sigev_notify_function = &expired;
+    timer_create(CLOCK_PROCESS_CPUTIME_ID,&event,&timer_id);
+
+    struct itimerspec its;
+    its.it_value.tv_sec = 0;
+    its.it_value.tv_nsec = ms * 1000000;
+    its.it_interval.tv_sec = 0;
+    its.it_interval.tv_nsec = 0;
+    timer_settime(timer_id,0,&its,NULL);
+
+
+}
 
 void managerCentral(){
 
@@ -58,6 +82,8 @@ void dccthread_init(void (*func)(int),int param){
     dlist_push_right(central.ready_queue,main);
 
     central.globalID = 0;
+
+    create_timer(10);
 
     setcontext(&central.manager);
 
