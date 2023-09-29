@@ -3,7 +3,11 @@
 #include <stdlib.h>
 #include "dccthread.h"
 #include "dlist.h"
+#include <signal.h>
 
+typedef struct{
+    int signal;
+} timer_enable;
 
 typedef struct dccthread{
     const char* name;
@@ -17,15 +21,67 @@ typedef struct {
     struct dlist* wait_queue;
     dccthread_t* current_thread;
     int globalID;
+    timer_enable control;
+    sigset_t block_timer;
 } managerThreads;
+
+#define block() sigprocmask( SIG_BLOCK, &central.block_timer, NULL )
+#define unblock() sigprocmask( SIG_UNBLOCK, &central.block_timer, NULL )
+// #define block() {central.control.signal = 0;}
+// #define unblock() {central.control.signal = 1;}
+#define SIGNAL SIGALRM
 
 managerThreads central;
 
+void expired(int signo){
+        if(signo == SIGNAL){
+            dccthread_yield();
+        }
+}
+
+
+void create_timer(int ms){
+    struct sigevent event = { 0 };
+    struct sigaction sa;
+    timer_t timer_id = 0;
+
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sa.sa_sigaction = (void*)expired;
+    // sigemptyset(&sa.sa_mask);
+    sigaction(SIGNAL, &sa, NULL);
+
+    sigemptyset(&central.block_timer);
+    sigaddset(&central.block_timer, SIGNAL);
+    block();
+
+    event.sigev_notify = SIGEV_SIGNAL;
+    event.sigev_value.sival_ptr = &timer_id;
+    // event.sigev_notify_function = &expired;
+    event.sigev_signo = SIGNAL;
+
+    timer_create(CLOCK_PROCESS_CPUTIME_ID,&event,&timer_id);
+
+    struct itimerspec its;
+    its.it_value.tv_sec = 0;
+    its.it_value.tv_nsec = ms * 1000000;
+    its.it_interval.tv_sec = 0;
+    its.it_interval.tv_nsec = ms * 1000000;
+    timer_settime(timer_id,0,&its,NULL);
+
+    sigemptyset(&central.block_timer);
+    sigaddset(&central.block_timer,SIGNAL);
+    // block();
+    unblock();
+
+}
+
 void managerCentral(){
 
+    block();
     dccthread_t* thread = dlist_pop_left(central.ready_queue);
     central.current_thread = thread;
     setcontext(&thread->context);
+    unblock();
 }
 
 void dccthread_init(void (*func)(int),int param){
@@ -58,6 +114,9 @@ void dccthread_init(void (*func)(int),int param){
     dlist_push_right(central.ready_queue,main);
 
     central.globalID = 0;
+    central.control.signal = 1;
+
+    create_timer(10);
 
     setcontext(&central.manager);
 
@@ -66,6 +125,7 @@ void dccthread_init(void (*func)(int),int param){
 }
 
 dccthread_t* dccthread_create(const char* name, void (*func)(int),int param){
+    block();
     dccthread_t* newThread = (dccthread_t*)malloc(sizeof(dccthread_t));
     newThread->name = name;
     newThread->id = central.globalID++;
@@ -83,19 +143,18 @@ dccthread_t* dccthread_create(const char* name, void (*func)(int),int param){
     dlist_push_right(central.ready_queue,newThread);
 
     // setcontext(&central.manager);
-
+    unblock();
     return newThread;
 
 }
 
 void dccthread_yield(){
-    
-    // dlist_push_right(central.ready_queue,central.current_thread);
+
+    block();
     getcontext(&central.current_thread->context);
     dlist_push_right(central.ready_queue,central.current_thread);
     swapcontext(&central.current_thread->context,&central.manager);
-    
-
+    unblock();
 }
 
 dccthread_t * dccthread_self(){
@@ -109,6 +168,7 @@ const char * dccthread_name(dccthread_t *tid){
 void dccthread_wait(dccthread_t* tid){
     
     // printf("tid - %d x  current thread - %d x global - %d \n",tid->id,central.current_thread->id,central.globalID);
+    block();
     if(tid->id >= central.current_thread->id){
         getcontext(&central.current_thread->context);
         struct dlist* tmp = dlist_create();
@@ -122,8 +182,11 @@ void dccthread_wait(dccthread_t* tid){
         central.ready_queue = tmp;
         swapcontext(&central.current_thread->context,&central.manager);
     }
+    unblock();
 }
 
 void dccthread_exit(){
+    block();
     swapcontext(&central.current_thread->context,&central.manager);
+    unblock();
 }
