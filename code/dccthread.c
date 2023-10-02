@@ -13,61 +13,82 @@ typedef struct dccthread{
     int blocking;
 } dccthread_t;
 
+typedef struct{
+    struct sigaction sa;
+    struct sigevent event;
+    timer_t timer_id;
+    struct itimerspec its;
+} timerControl;
+
 typedef struct {
     ucontext_t manager;
     struct dlist* ready_queue;
     struct dlist* wait_queue;
     dccthread_t* current_thread;
     int globalID;
-    sigset_t block_timer;
+    timerControl timer;
 } managerThreads;
 
-#define block() sigprocmask( SIG_BLOCK, &central.block_timer, NULL)
-#define unblock() sigprocmask( SIG_BLOCK, &central.block_timer, NULL)
+// #define block() sigprocmask( SIG_BLOCK, &central.block_timer, NULL)
+// #define unblock() sigprocmask( SIG_UNBLOCK, &central.block_timer, NULL)
 // #define block() {central.control.signal = 0;}
 // #define unblock() {central.control.signal = 1;}
 #define SIGNAL SIGALRM
 
 managerThreads central;
 
-void expired(){
-        dccthread_yield();
+void expired(int signo){
+        if(signo == SIGNAL){
+            getcontext(&central.current_thread->context);
+            dlist_push_right(central.ready_queue,central.current_thread);
+            swapcontext(&central.current_thread->context,&central.manager);
+        }
 }
 
-
 void create_timer(int ms){
-    struct sigevent event = { 0 };
-    struct sigaction sa;
-    timer_t timer_id = 0;
+    // central.timer.event = { 0 };
 
-    sa.sa_flags = SA_SIGINFO;
-    sa.sa_sigaction = (void*)expired;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGNAL, &sa, NULL);
+    central.timer.timer_id = 0;
+    central.timer.sa.sa_flags = SA_SIGINFO;
+    central.timer.sa.sa_sigaction = (void*)expired;
+    sigemptyset(&central.timer.sa.sa_mask);
+    sigaction(SIGNAL, &central.timer.sa, NULL);
 
-    event.sigev_notify = SIGEV_SIGNAL;
+    central.timer.event.sigev_notify = SIGEV_SIGNAL;
     // event.sigev_value.sival_ptr = &timer_id;
-    event.sigev_signo = SIGNAL;
+    central.timer.event.sigev_signo = SIGNAL;
 
-    timer_create(CLOCK_PROCESS_CPUTIME_ID,&event,&timer_id);
-
-    struct itimerspec its;
-    its.it_value.tv_sec = 0;
-    its.it_value.tv_nsec = ms * 1000000;
-    its.it_interval.tv_sec = 0;
-    its.it_interval.tv_nsec = ms * 1000000;
-    timer_settime(timer_id,0,&its,NULL);
+    timer_create(CLOCK_PROCESS_CPUTIME_ID,&central.timer.event,&central.timer.timer_id);
 
 
+    central.timer.its.it_value.tv_sec = 0;
+    central.timer.its.it_value.tv_nsec = ms * 1000000;
+    central.timer.its.it_interval.tv_sec = 0;
+    central.timer.its.it_interval.tv_nsec = ms * 1000000;
+    timer_settime(central.timer.timer_id,0,&central.timer.its,NULL);
+
+    // sigemptyset(&central.old_timer);
+}
+
+void block(){
+    if(!central.current_thread->blocking){
+        central.current_thread->blocking = 1;
+        timer_delete(central.timer.timer_id);
+    }
+}
+
+void unblock(){
+    central.current_thread->blocking = 0;
+    create_timer(10);
 }
 
 void managerCentral(){
 
-    block();
+    // block();
     dccthread_t* thread = dlist_pop_left(central.ready_queue);
     central.current_thread = thread;
     setcontext(&thread->context);
-    unblock();
+    // unblock();
 }
 
 void dccthread_init(void (*func)(int),int param){
@@ -82,8 +103,8 @@ void dccthread_init(void (*func)(int),int param){
     }
     makecontext(&central.manager,managerCentral,0);
     
-     //Create a main Thread
-     dccthread_t* main = (dccthread_t*)malloc(sizeof(dccthread_t));
+    //Create a main Thread
+    dccthread_t* main = (dccthread_t*)malloc(sizeof(dccthread_t));
     getcontext(&(main->context));
     main->context.uc_stack.ss_size = THREAD_STACK_SIZE;
     main->context.uc_stack.ss_flags = 0;
