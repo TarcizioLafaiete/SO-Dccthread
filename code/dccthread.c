@@ -4,13 +4,15 @@
 #include "dccthread.h"
 #include "dlist.h"
 #include <signal.h>
+#include <string.h>
 
 
 typedef struct dccthread{
-    const char* name;
+    char name[DCCTHREAD_MAX_NAME_SIZE];
     ucontext_t context;
     int id;
     int blocking;
+    int idWaited;
 } dccthread_t;
 
 typedef struct{
@@ -23,26 +25,39 @@ typedef struct{
 typedef struct {
     ucontext_t manager;
     struct dlist* ready_queue;
-    struct dlist* wait_queue;
     dccthread_t* current_thread;
+    dccthread_t* sleep_thread;
     int globalID;
     timerControl timer;
+    timerControl sleeper;
 } managerThreads;
 
 // #define block() sigprocmask( SIG_BLOCK, &central.block_timer, NULL)
 // #define unblock() sigprocmask( SIG_UNBLOCK, &central.block_timer, NULL)
 // #define block() {central.control.signal = 0;}
 // #define unblock() {central.control.signal = 1;}
-#define SIGNAL SIGALRM
+#define SIGNAL_BLOCK SIGUSR1
+#define SIGNAL_SLEEP SIGALRM
 
 managerThreads central;
 
-void expired(int signo){
-        if(signo == SIGNAL){
+void __expired(int signo){
+        if(signo == SIGNAL_BLOCK){
             getcontext(&central.current_thread->context);
             dlist_push_right(central.ready_queue,central.current_thread);
             swapcontext(&central.current_thread->context,&central.manager);
+            // setcontext(&central.current_thread->context);
         }
+}
+
+void __sleep(){
+        // if(signo == SIGNAL_SLEEP){
+            getcontext(&central.current_thread->context);
+            dlist_push_right(central.ready_queue,central.sleep_thread);
+            timer_delete(central.sleeper.timer_id);
+            // swapcontext(&central.current_thread->context,&central.manager);
+            setcontext(&central.current_thread->context);
+        // }
 }
 
 void create_timer(int ms){
@@ -50,13 +65,13 @@ void create_timer(int ms){
 
     central.timer.timer_id = 0;
     central.timer.sa.sa_flags = SA_SIGINFO;
-    central.timer.sa.sa_sigaction = (void*)expired;
+    central.timer.sa.sa_sigaction = (void*)__expired;
     sigemptyset(&central.timer.sa.sa_mask);
-    sigaction(SIGNAL, &central.timer.sa, NULL);
+    sigaction(SIGNAL_BLOCK, &central.timer.sa, NULL);
 
     central.timer.event.sigev_notify = SIGEV_SIGNAL;
     // event.sigev_value.sival_ptr = &timer_id;
-    central.timer.event.sigev_signo = SIGNAL;
+    central.timer.event.sigev_signo = SIGNAL_BLOCK;
 
     timer_create(CLOCK_PROCESS_CPUTIME_ID,&central.timer.event,&central.timer.timer_id);
 
@@ -68,6 +83,36 @@ void create_timer(int ms){
     timer_settime(central.timer.timer_id,0,&central.timer.its,NULL);
 
     // sigemptyset(&central.old_timer);
+}
+
+void create_sleep(struct timespec ts){
+    
+    struct itimerspec timer_spec;
+    struct sigevent sev;
+    timer_t timer_id;
+    // Crie o temporizador
+    sev.sigev_notify = SIGEV_THREAD;
+    sev.sigev_notify_function = (void*)__sleep;
+    sev.sigev_value.sival_ptr = &timer_id;
+    if (timer_create(CLOCK_REALTIME, &sev, &timer_id) == -1) {
+        perror("timer_create");
+        exit(EXIT_FAILURE);
+    }
+
+    // Configurar a especificação do temporizador
+    timer_spec.it_value = ts;
+    timer_spec.it_interval.tv_sec = 0;
+    timer_spec.it_interval.tv_nsec = 0;
+
+    // Ative o temporizador
+    if (timer_settime(timer_id, 0, &timer_spec, NULL) == -1) {
+        perror("timer_settime");
+        exit(EXIT_FAILURE);
+    }
+
+    central.sleeper.timer_id = timer_id;
+    // printf("Sleeper criado \n");
+   
 }
 
 void block(){
@@ -112,7 +157,8 @@ void dccthread_init(void (*func)(int),int param){
         perror("Failing allocating space to main thread");
         exit(1);
     }
-    main->name = "main";
+    // main->name = "main";
+    strcpy(main->name,"main");
     main->id = 0;
     main->context.uc_link = &central.manager;
     makecontext(&(main->context),(void(*)(void))func,1,param);
@@ -133,7 +179,9 @@ void dccthread_init(void (*func)(int),int param){
 dccthread_t* dccthread_create(const char* name, void (*func)(int),int param){
     block();
     dccthread_t* newThread = (dccthread_t*)malloc(sizeof(dccthread_t));
-    newThread->name = name;
+    // newThread->name = name;
+    strcpy(newThread->name,name);
+
     newThread->id = central.globalID++;
 
     getcontext(&(newThread->context));
@@ -191,5 +239,18 @@ void dccthread_wait(dccthread_t* tid){
 void dccthread_exit(){
     block();
     swapcontext(&central.current_thread->context,&central.manager);
+    unblock();
+}
+
+void dccthread_sleep(struct timespec ts){
+    
+    block();
+ 
+    getcontext(&central.current_thread->context);
+    central.sleep_thread = central.current_thread;
+    create_sleep(ts);
+    
+    swapcontext(&central.current_thread->context,&central.manager);
+
     unblock();
 }
