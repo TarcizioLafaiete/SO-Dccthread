@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <string.h>
 
+
 #define SIGNAL_BLOCK SIGUSR1
 
 /*
@@ -159,7 +160,6 @@ int dlist_find(struct dlist* queue, dccthread_t* thread){
 /*
 ================================================= MANAGER THREAD FUNCTION ====================================================================
  */
-
 void managerCentral(){
 
     dccthread_t* thread = dlist_pop_left(central.ready_queue);
