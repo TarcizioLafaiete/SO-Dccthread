@@ -6,6 +6,11 @@
 #include <signal.h>
 #include <string.h>
 
+#define SIGNAL_BLOCK SIGUSR1
+
+/*
+================================================= STRUCT'S AND GLOBAL VARIABLES DECLARATION ====================================================================
+ */
 
 typedef struct dccthread{
     char name[DCCTHREAD_MAX_NAME_SIZE];
@@ -13,15 +18,8 @@ typedef struct dccthread{
     int id;
     int blocking;
     int idWaited;
-    dccthread_t* waiting;
 } dccthread_t;
 
-typedef struct{
-    struct sigaction sa;
-    struct sigevent event;
-    timer_t timer_id;
-    struct itimerspec its;
-} timerControl;
 
 typedef struct {
     ucontext_t manager;
@@ -31,64 +29,71 @@ typedef struct {
     dccthread_t* current_thread;
     dccthread_t* sleep_thread;
     int globalID;
-    int wait;
-    timerControl timer;
-    timerControl sleeper;
-    sigset_t mask;
+    timer_t timer;
+    timer_t sleeper;
 } managerThreads;
 
-// #define block() sigprocmask( SIG_BLOCK, &central.mask, NULL)
-// #define unblock() sigprocmask( SIG_UNBLOCK, &central.mask, NULL)
-// #define block() {central.control.signal = 0;}
-// #define unblock() {central.control.signal = 1;}
-#define SIGNAL_BLOCK SIGUSR1
-#define SIGNAL_SLEEP SIGALRM
-
+//Global variable
 managerThreads central;
 
+/*
+================================================= TIMER TRATEMENT FUNCTIONS ====================================================================
+ */
+
 void __expired(int signo){
+        //Verify if function was called for correct signal
         if(signo == SIGNAL_BLOCK){
             getcontext(&central.current_thread->context);
             dlist_push_right(central.ready_queue,central.current_thread);
             swapcontext(&central.current_thread->context,&central.manager);
-            // setcontext(&central.current_thread->context);
         }
 }
 
 void __sleep(){
-        // if(signo == SIGNAL_SLEEP){
-            getcontext(&central.current_thread->context);
-            dccthread_t* sleep_thread = dlist_pop_left(central.sleep_queue);
-            dlist_push_right(central.ready_queue,sleep_thread);
-            timer_delete(central.sleeper.timer_id);
-            swapcontext(&central.current_thread->context,&central.manager);
-            // setcontext(&central.current_thread->context);
-        // }
+        getcontext(&central.current_thread->context);
+        dccthread_t* sleep_thread = dlist_pop_left(central.sleep_queue);
+        dlist_push_right(central.ready_queue,sleep_thread);
+        timer_delete(central.sleeper);
+        swapcontext(&central.current_thread->context,&central.manager);
 }
+
+/*
+================================================= TIMER CREATER'S ====================================================================
+ */
 
 void create_timer(int ms){
     // central.timer.event = { 0 };
 
-    central.timer.timer_id = 0;
-    central.timer.sa.sa_flags = SA_SIGINFO;
-    central.timer.sa.sa_sigaction = (void*)__expired;
-    sigemptyset(&central.timer.sa.sa_mask);
-    sigaction(SIGNAL_BLOCK, &central.timer.sa, NULL);
+    struct sigaction sa;
+    struct sigevent event;
+    timer_t timer_id;
+    struct itimerspec its;
 
-    central.timer.event.sigev_notify = SIGEV_SIGNAL;
-    // event.sigev_value.sival_ptr = &timer_id;
-    central.timer.event.sigev_signo = SIGNAL_BLOCK;
+    timer_id = 0;
+    //Configure sa struct
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = (void*)__expired;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGNAL_BLOCK, &sa, NULL);
 
-    timer_create(CLOCK_PROCESS_CPUTIME_ID,&central.timer.event,&central.timer.timer_id);
+    //Configure event
+    event.sigev_notify = SIGEV_SIGNAL; //Vefiry documetation
+    event.sigev_signo = SIGNAL_BLOCK;
+
+    //Create timer
+    timer_create(CLOCK_PROCESS_CPUTIME_ID,&event,&timer_id);
 
 
-    central.timer.its.it_value.tv_sec = 0;
-    central.timer.its.it_value.tv_nsec = ms * 1000000;
-    central.timer.its.it_interval.tv_sec = 0;
-    central.timer.its.it_interval.tv_nsec = ms * 1000000;
-    timer_settime(central.timer.timer_id,0,&central.timer.its,NULL);
+    //Define a timer in ms and set timer
+    its.it_value.tv_sec = 0;
+    its.it_value.tv_nsec = ms * 1000000;
+    its.it_interval.tv_sec = 0;
+    its.it_interval.tv_nsec = ms * 1000000;
+    timer_settime(timer_id,0,&its,NULL);
 
-    // sigemptyset(&central.old_timer);
+    //Save timer_id to use in block() function
+    central.timer = timer_id;
+
 }
 
 void create_sleep(struct timespec ts){
@@ -96,35 +101,32 @@ void create_sleep(struct timespec ts){
     struct itimerspec timer_spec;
     struct sigevent sev;
     timer_t timer_id;
-    // Crie o temporizador
-    sev.sigev_notify = SIGEV_THREAD;
+    
+    // Configure event struct
+    sev.sigev_notify = SIGEV_THREAD; //Verify documentation
     sev.sigev_notify_function = (void*)__sleep;
     sev.sigev_value.sival_ptr = &timer_id;
-    if (timer_create(CLOCK_REALTIME, &sev, &timer_id) == -1) {
-        perror("timer_create");
-        exit(EXIT_FAILURE);
-    }
+    timer_create(CLOCK_REALTIME, &sev, &timer_id);
 
-    // Configurar a especificação do temporizador
+    // Pass timescpec parameter to itimerspec and set timer
     timer_spec.it_value = ts;
     timer_spec.it_interval.tv_sec = 0;
     timer_spec.it_interval.tv_nsec = 0;
+    timer_settime(timer_id, 0, &timer_spec, NULL);
 
-    // Ative o temporizador
-    if (timer_settime(timer_id, 0, &timer_spec, NULL) == -1) {
-        perror("timer_settime");
-        exit(EXIT_FAILURE);
-    }
-
-    central.sleeper.timer_id = timer_id;
-    // printf("Sleeper criado \n");
+    //Save timer_id to use in __sleep() function
+    central.sleeper = timer_id;
    
 }
+
+/*
+================================================= RACE CONDITION TREATAMENT FUNCTION ====================================================================
+ */
 
 void block(){
     if(!central.current_thread->blocking){
         central.current_thread->blocking = 1;
-        timer_delete(central.timer.timer_id);
+        timer_delete(central.timer);
     }
 }
 
@@ -133,8 +135,12 @@ void unblock(){
     create_timer(10);
 }
 
+/*
+================================================= AUXILIARY FUNCTION TO FIND A THREAD IN QUEUE ====================================================================
+ */
+
 int dlist_find(struct dlist* queue, dccthread_t* thread){
-    if(dlist_empty(queue)){
+   if(dlist_empty(queue)){
         return 0;
     }
     struct dnode *curr = queue->head;
@@ -149,6 +155,11 @@ int dlist_find(struct dlist* queue, dccthread_t* thread){
     }
 }
 
+
+/*
+================================================= MANAGER THREAD FUNCTION ====================================================================
+ */
+
 void managerCentral(){
 
     dccthread_t* thread = dlist_pop_left(central.ready_queue);
@@ -157,17 +168,14 @@ void managerCentral(){
 
 }
 
+/*
+================================================= DCCTHREAD_T FUNCTION'S ====================================================================
+ */
+
 void dccthread_init(void (*func)(int),int param){
 
     //Create a Manager Thread
     getcontext(&central.manager);
-
-    // sigemptyset(&central.mask);
-    // sigaddset(&central.mask,SIGNAL_BLOCK);
-    // sigaddset(&central.mask,SIGNAL_SLEEP);
-    // sigprocmask(SIG_SETMASK,&central.mask,NULL);
-
-    // central.manager.uc_sigmask = central.mask;
 
     central.manager.uc_stack.ss_size = THREAD_STACK_SIZE;
     central.manager.uc_stack.ss_flags = 0;
@@ -186,40 +194,49 @@ void dccthread_init(void (*func)(int),int param){
         perror("Failing allocating space to main thread");
         exit(1);
     }
-    // main->name = "main";
-    strcpy(firstThread->name,"main");
+
+    //Fill dcctthread_t variables
+    strcpy(firstThread->name,"main"); //Must be this function
     firstThread->id = 0;
     firstThread->idWaited = -1;
-    firstThread->context.uc_link = &central.manager;
+    firstThread->context.uc_link = &central.manager;  //After the function end's return the context to manager
     makecontext(&(firstThread->context),(void(*)(void))func,1,param);
 
+
+    //Creating the queue's
     central.ready_queue = dlist_create();
     central.wait_queue = dlist_create();
     central.sleep_queue = dlist_create();
+    
+    //Start ready_queue with main thread
     dlist_push_right(central.ready_queue,firstThread);
 
+    //Start global ID
     central.globalID = 0;
-    central.wait = 0;
-    // central.sleep_thread->id = 0;
 
+    //Start preemption timer 
     create_timer(10);
 
-    // managerCentral();
+    //Go to Manager thread
     setcontext(&central.manager);
 
+    //Non - returnable function
     exit(EXIT_SUCCESS);
 
 }
 
+
+
 dccthread_t* dccthread_create(const char* name, void (*func)(int),int param){
     block();
+
     dccthread_t* newThread = (dccthread_t*)malloc(sizeof(dccthread_t));
-    // newThread->name = name;
-    strcpy(newThread->name,name);
+    strcpy(newThread->name,name); // Must be this function
 
     newThread->id = central.globalID++;
     newThread->idWaited = -1;
 
+    //Creation context
     getcontext(&(newThread->context));
     newThread->context.uc_stack.ss_size = THREAD_STACK_SIZE;
     newThread->context.uc_stack.ss_flags = 0;
@@ -227,11 +244,15 @@ dccthread_t* dccthread_create(const char* name, void (*func)(int),int param){
         perror("Failing allocationg space to new thread");
         return NULL;
     }
-    newThread->context.uc_link = &central.manager;
+    newThread->context.uc_link = &central.manager; // After the function end's return the context to manager
+    
     makecontext(&(newThread->context),(void(*)(void))func,1,param);
+    
+    //Put in ready_queue
     dlist_push_right(central.ready_queue,newThread);
 
     unblock();
+
     return newThread;
 
 }
@@ -239,8 +260,11 @@ dccthread_t* dccthread_create(const char* name, void (*func)(int),int param){
 void dccthread_yield(){
 
     block();
+    //Save current context
     getcontext(&central.current_thread->context);
+    //Return current_thread to ready_queue
     dlist_push_right(central.ready_queue,central.current_thread);
+    //Go to manager to start another thread
     swapcontext(&central.current_thread->context,&central.manager);
     unblock();
 }
@@ -256,15 +280,14 @@ const char * dccthread_name(dccthread_t *tid){
 void dccthread_wait(dccthread_t* tid){
     
     block();
-    // printf("thread %s \n",tid->name);
-    // printf("sleep %s \n",central.sleep_thread->name);
+    //Verify existence of thread
     if(dlist_find(central.ready_queue,tid) || dlist_find(central.sleep_queue,tid)){
         getcontext(&central.current_thread->context);
         tid->idWaited = central.current_thread->id;
-        // printf("%d waited \n",tid->idWaited);
+        //current_thread now is waiting tid thread
         dlist_push_right(central.wait_queue,central.current_thread);
+        //tid thread go to ready queue
         dlist_push_right(central.ready_queue,tid);
-        // printf("size %d \n",central.ready_queue->count);
         swapcontext(&central.current_thread->context,&central.manager);
     }
 
@@ -273,13 +296,13 @@ void dccthread_wait(dccthread_t* tid){
 
 void dccthread_exit(){
     block();
-    // printf("current: %s ready size %d \n", central.current_thread->name,central.ready_queue->count);
+    //Verify if has a thread waiting it
     if(central.current_thread->idWaited != -1){
         dccthread_t* thread = dlist_pop_left(central.wait_queue);
+        //Return the waiter thread to ready queue
         dlist_push_right(central.ready_queue,thread);
     }
     swapcontext(&central.current_thread->context,&central.manager);
-    // setcontext(&central.manager);
     unblock();
 }
 
@@ -288,10 +311,11 @@ void dccthread_sleep(struct timespec ts){
     block();
  
     getcontext(&central.current_thread->context);
+    // Put thread in sleep_queue
     dlist_push_right(central.sleep_queue,central.current_thread);
+    //Create sleep timer
     create_sleep(ts);
-    
-    // setcontext(&central.manager);
+    ;
     swapcontext(&central.current_thread->context,&central.manager);
 
     unblock();
